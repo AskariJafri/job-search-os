@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate workflows, compose & scripts
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every n8n workflow is a JSON document. A malformed one fails silently on
+      # import, so parse them all in CI.
+      - name: Validate n8n workflow JSON
+        run: |
+          fail=0
+          count=0
+          for f in $(find n8n/workflows -name '*.json'); do
+            count=$((count + 1))
+            if ! jq empty "$f" 2>/dev/null; then
+              echo "::error file=$f::invalid JSON"
+              fail=1
+            fi
+          done
+          echo "Validated $count workflow file(s)."
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No workflow JSON found — expected files under n8n/workflows/"
+            exit 1
+          fi
+          exit $fail
+
+      # Catches typos in service definitions and unresolved variables without
+      # starting anything. Uses .env.example so no secrets are needed.
+      - name: Validate docker-compose
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          echo "docker-compose config OK"
+          rm -f .env
+
+      - name: Shellcheck bootstrap script
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shellcheck scripts/bootstrap.sh
+
+  secrets-guard:
+    name: Guard against committed secrets
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # This repo legitimately documents key/token files. This job fails the
+      # build if one is ever actually committed.
+      - name: Assert no secret files are tracked
+        run: |
+          bad=$(git ls-files | grep -E '(^|/)\.env$|(^|/)\.env\..*|_key\.txt$|_token\.txt$|\.pem$' | grep -v '\.env\.example' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::Secret-bearing files are tracked in git:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "No secret files tracked."

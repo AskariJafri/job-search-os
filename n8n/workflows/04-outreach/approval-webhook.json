@@ -1,0 +1,58 @@
+{
+  "name": "04b Outreach: Approval Webhook",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "outreach-decision",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh-decision",
+      "webhookId": "3553adf6-9417-4666-805e-e249982bc7ed",
+      "name": "Approve/Reject Link",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate the decision and build the state-transition SQL.\nconst token = ($json.query && $json.query.token) || '';\nlet decision = ($json.query && $json.query.decision) || '';\nif (!['approved','rejected'].includes(decision)) decision = 'rejected';\nif (!/^[0-9a-fA-F-]{36}$/.test(token)) {\n  return [{ json: { ok: false, message: 'Invalid token', query: 'SELECT 1 WHERE false;' } }];\n}\nconst outreachStatus = decision === 'approved' ? 'approved' : 'cancelled';\nconst query = `WITH a AS (UPDATE app.approvals SET status = '${decision}', decided_at = now() WHERE token = '${token}' AND status = 'pending' RETURNING entity_id) UPDATE app.outreach o SET status = '${outreachStatus}', approved_at = CASE WHEN '${decision}' = 'approved' THEN now() ELSE approved_at END FROM a WHERE o.id = a.entity_id RETURNING o.id;`;\nreturn [{ json: { ok: true, decision, query } }];"
+      },
+      "id": "code-decide",
+      "name": "Build Decision SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": { "operation": "executeQuery", "query": "={{ $json.query }}", "options": {} },
+      "id": "pg-apply",
+      "name": "Apply Decision",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [680, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ ($('Apply Decision').first().json.id ? 'Decision recorded: ' + $('Build Decision SQL').first().json.decision + '. You can close this tab.' : 'No matching pending approval — already decided or invalid token.') }}",
+        "options": {}
+      },
+      "id": "resp",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "Approve/Reject Link": { "main": [[{ "node": "Build Decision SQL", "type": "main", "index": 0 }]] },
+    "Build Decision SQL": { "main": [[{ "node": "Apply Decision", "type": "main", "index": 0 }]] },
+    "Apply Decision": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

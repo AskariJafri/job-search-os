@@ -1,0 +1,138 @@
+# =============================================================================
+# AI Job Search OS — fully self-hosted, free/open-source stack
+# Usage:
+#   cp .env.example .env   &&  edit .env
+#   docker compose up -d
+#   ./scripts/bootstrap.sh   (pulls Ollama models, creates n8n db, seeds Chroma)
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: jsos-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: ${TZ}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Init scripts run once, in alphabetical order, on first boot only.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: jsos-ollama
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ}
+      # Windows bind-mounted models load slowly over the FS boundary; give the
+      # runner more time to start and keep models resident once loaded.
+      OLLAMA_LOAD_TIMEOUT: "15m"
+      OLLAMA_KEEP_ALIVE: "1h"
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      # Bind-mount the host Ollama dir so already-downloaded models are reused.
+      # Set OLLAMA_HOST_MODELS_DIR in .env; falls back to the named volume path.
+      - "${OLLAMA_HOST_MODELS_DIR:-ollama-data}:/root/.ollama"
+    # Uncomment to use an NVIDIA GPU (massively faster). Requires nvidia-container-toolkit.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: jsos-chromadb
+    restart: unless-stopped
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+      TZ: ${TZ}
+    ports:
+      - "${CHROMA_PORT:-8000}:8000"
+    volumes:
+      - chroma-data:/data
+
+  playwright-service:
+    build: ./services/playwright-service
+    container_name: jsos-playwright
+    restart: unless-stopped
+    environment:
+      PORT: ${PLAYWRIGHT_PORT:-4000}
+      API_KEY: ${PLAYWRIGHT_API_KEY}
+      SCRAPE_MIN_DELAY_MS: ${SCRAPE_MIN_DELAY_MS}
+      SCRAPE_MAX_CONCURRENCY: ${SCRAPE_MAX_CONCURRENCY}
+      SCRAPE_USER_AGENT: ${SCRAPE_USER_AGENT}
+      SCRAPE_RESPECT_ROBOTS: ${SCRAPE_RESPECT_ROBOTS}
+      LOG_LEVEL: ${LOG_LEVEL}
+      TZ: ${TZ}
+    ports:
+      - "${PLAYWRIGHT_PORT:-4000}:4000"
+    depends_on:
+      - postgres
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: jsos-n8n
+    restart: unless-stopped
+    # Load the full .env so workflow $env.* expressions (PLAYWRIGHT_API_KEY,
+    # SCORE_MIN_TO_APPLY, WEBHOOK_URL, OUTREACH_*, GMAIL_ADDRESS, ...) resolve.
+    env_file:
+      - .env
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: ${N8N_PORT}
+      N8N_PROTOCOL: ${N8N_PROTOCOL}
+      WEBHOOK_URL: ${WEBHOOK_URL}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+      N8N_BASIC_AUTH_ACTIVE: ${N8N_BASIC_AUTH_ACTIVE}
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      # Persist n8n's own data in Postgres (separate database, see bootstrap).
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: ${POSTGRES_HOST}
+      DB_POSTGRESDB_PORT: ${POSTGRES_PORT}
+      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      # Make env vars usable inside Code/Function nodes.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      # Allow community packages if you later add nodes.
+      N8N_COMMUNITY_PACKAGES_ENABLED: "true"
+      TZ: ${TZ}
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    volumes:
+      - n8n-data:/home/node/.n8n
+      # App working directory for tailored resumes, cover letters, reports.
+      - ./storage:/data/storage
+      - ./n8n/workflows:/data/workflows:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+      chromadb:
+        condition: service_started
+      playwright-service:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  ollama-data:
+  chroma-data:
+  n8n-data:

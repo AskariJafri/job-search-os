@@ -1,0 +1,78 @@
+{
+  "name": "05a Inbox: Monitor + Classify Replies",
+  "nodes": [
+    {
+      "parameters": {
+        "mailbox": "INBOX",
+        "postProcessAction": "read",
+        "format": "simple",
+        "options": {}
+      },
+      "id": "trg-imap",
+      "name": "New Email (IMAP)",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2,
+      "position": [220, 300],
+      "credentials": { "imap": { "id": "REPLACE_IMAP_CRED", "name": "Gmail IMAP" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.OLLAMA_HOST || 'ollama' }}:{{ $env.OLLAMA_PORT || '11434' }}/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL_REASONING || 'llama3.1:8b', stream: false, format: 'json', options: { temperature: 0.2 }, system: 'You triage recruiter replies. Return ONLY JSON {\"classification\": one of [\"interview_request\",\"rejection\",\"info_request\",\"scheduling\",\"other\"], \"sentiment\": one of [\"positive\",\"neutral\",\"negative\"], \"summary\": \"<one sentence>\", \"suggested_reply\": \"<a concise, polite draft reply>\"}.', prompt: 'SUBJECT: ' + ($json.subject || '') + '\\n\\nBODY:\\n' + (($json.textPlain || $json.text || $json.textHtml || '').slice(0, 6000)) }) }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "http-classify",
+      "name": "Classify Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract sender + build an idempotent inbound interaction insert.\nfunction q(s){ return String(s==null?'':s).replace(/'/g, \"''\"); }\nconst email = $('New Email (IMAP)').item.json;\nlet from = '';\nif (email.from && email.from.value && email.from.value[0]) from = email.from.value[0].address;\nelse if (typeof email.from === 'string') { const m = email.from.match(/<([^>]+)>/); from = m ? m[1] : email.from; }\nconst subject = email.subject || '';\nconst text = email.textPlain || email.text || email.textHtml || '';\nconst mid = email.messageId || email.metadata?.['message-id'] || ('imap-' + Date.now());\nlet c = {}; const cr = $('Classify Reply').item.json.response || '';\ntry { c = JSON.parse(cr); } catch(e) { const m = cr.match(/\\{[\\s\\S]*\\}/); if (m) { try { c = JSON.parse(m[0]); } catch(_){} } }\nconst query = `INSERT INTO app.interactions (recruiter_id, direction, channel, message_id, subject, body, summary, classification, sentiment, suggested_reply) VALUES ((SELECT id FROM app.recruiters WHERE email = '${q(from)}' LIMIT 1), 'inbound', 'email', '${q(mid)}', '${q(subject)}', '${q(text.slice(0,8000))}', '${q(c.summary)}', '${q(c.classification || 'other')}', '${q(c.sentiment || 'neutral')}', '${q(c.suggested_reply)}') ON CONFLICT (message_id) DO NOTHING;`;\nreturn [{ json: { query, from, subject, classification: c.classification || 'other', summary: c.summary || '', suggested_reply: c.suggested_reply || '' } }];"
+      },
+      "id": "code-build",
+      "name": "Build Interaction SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": { "operation": "executeQuery", "query": "={{ $json.query }}", "options": {} },
+      "id": "pg-ins",
+      "name": "Record Interaction",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [940, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.GMAIL_ADDRESS }}",
+        "toEmail": "={{ $env.GMAIL_ADDRESS }}",
+        "subject": "=[Reply · {{ $('Build Interaction SQL').item.json.classification }}] {{ $('Build Interaction SQL').item.json.subject }}",
+        "emailFormat": "text",
+        "text": "=From: {{ $('Build Interaction SQL').item.json.from }}\nClassification: {{ $('Build Interaction SQL').item.json.classification }}\n\nSummary: {{ $('Build Interaction SQL').item.json.summary }}\n\n--- Suggested reply ---\n{{ $('Build Interaction SQL').item.json.suggested_reply }}",
+        "options": {}
+      },
+      "id": "smtp-digest",
+      "name": "Send Me Digest",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1180, 300],
+      "credentials": { "smtp": { "id": "REPLACE_SMTP_CRED", "name": "Gmail SMTP" } }
+    }
+  ],
+  "connections": {
+    "New Email (IMAP)": { "main": [[{ "node": "Classify Reply", "type": "main", "index": 0 }]] },
+    "Classify Reply": { "main": [[{ "node": "Build Interaction SQL", "type": "main", "index": 0 }]] },
+    "Build Interaction SQL": { "main": [[{ "node": "Record Interaction", "type": "main", "index": 0 }]] },
+    "Record Interaction": { "main": [[{ "node": "Send Me Digest", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

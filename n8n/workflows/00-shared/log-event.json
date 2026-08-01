@@ -1,0 +1,34 @@
+{
+  "name": "00-shared: Log Event",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trg-log",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO app.logs (workflow, module, level, message, context, execution_id) VALUES ($1, $2, $3, $4, $5::jsonb, $6);",
+        "options": {
+          "queryReplacement": "={{ $json.workflow || 'unknown' }},{{ $json.module || '' }},{{ $json.level || 'info' }},{{ $json.message || '' }},{{ JSON.stringify($json.context || {}) }},{{ $json.execution_id || $execution.id }}"
+        }
+      },
+      "id": "pg-log",
+      "name": "Insert Log Row",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [480, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": { "main": [[{ "node": "Insert Log Row", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

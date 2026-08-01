@@ -1,0 +1,85 @@
+{
+  "name": "04c Outreach: Send Approved (rate-limited)",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "minutes", "minutesInterval": 10 }] } },
+      "id": "trg-sched",
+      "name": "Every 10 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT o.id AS outreach_id, o.subject, o.body, o.recruiter_id, o.application_id, r.email AS recruiter_email, (SELECT count(*) FROM app.outreach s WHERE s.status = 'sent' AND s.sent_at > now() - interval '24 hours') AS sent_today FROM app.outreach o JOIN app.recruiters r ON r.id = o.recruiter_id WHERE o.status = 'approved' AND r.email IS NOT NULL ORDER BY o.approved_at ASC LIMIT 1;",
+        "options": {}
+      },
+      "id": "pg-next",
+      "name": "Get Next Approved",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [400, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "loose", "version": 2 },
+          "conditions": [{ "leftValue": "={{ $json.sent_today }}", "rightValue": "={{ Number($env.OUTREACH_MAX_PER_DAY || 15) }}", "operator": { "type": "number", "operation": "lt" } }],
+          "combinator": "and"
+        }
+      },
+      "id": "if-cap",
+      "name": "Under Daily Cap?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [620, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.GMAIL_ADDRESS }}",
+        "toEmail": "={{ $json.recruiter_email }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "smtp-send",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [840, 220],
+      "credentials": { "smtp": { "id": "REPLACE_SMTP_CRED", "name": "Gmail SMTP" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mark the outreach sent and record an outbound interaction in one query.\nfunction q(s){ return String(s==null?'':s).replace(/'/g, \"''\"); }\nconst o = $('Get Next Approved').item.json;\nconst query = `UPDATE app.outreach SET status = 'sent', sent_at = now() WHERE id = '${o.outreach_id}'; INSERT INTO app.interactions (recruiter_id, application_id, outreach_id, direction, channel, subject, body, message_id) VALUES ('${o.recruiter_id}', ${o.application_id ? `'${o.application_id}'` : 'NULL'}, '${o.outreach_id}', 'outbound', 'email', '${q(o.subject)}', '${q(o.body)}', 'sent-${o.outreach_id}'); INSERT INTO app.followups (recruiter_id, application_id, due_at, kind) VALUES ('${o.recruiter_id}', ${o.application_id ? `'${o.application_id}'` : 'NULL'}, now() + (interval '1 day' * ${Number($env.FOLLOWUP_DEFAULT_DAYS || 4)}), 'nudge');`;\nreturn [{ json: { query } }];"
+      },
+      "id": "code-mark",
+      "name": "Build Mark-Sent SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1060, 220]
+    },
+    {
+      "parameters": { "operation": "executeQuery", "query": "={{ $json.query }}", "options": {} },
+      "id": "pg-mark",
+      "name": "Mark Sent + Log Interaction",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1280, 220],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    }
+  ],
+  "connections": {
+    "Every 10 Minutes": { "main": [[{ "node": "Get Next Approved", "type": "main", "index": 0 }]] },
+    "Get Next Approved": { "main": [[{ "node": "Under Daily Cap?", "type": "main", "index": 0 }]] },
+    "Under Daily Cap?": { "main": [[{ "node": "Send Email", "type": "main", "index": 0 }], []] },
+    "Send Email": { "main": [[{ "node": "Build Mark-Sent SQL", "type": "main", "index": 0 }]] },
+    "Build Mark-Sent SQL": { "main": [[{ "node": "Mark Sent + Log Interaction", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

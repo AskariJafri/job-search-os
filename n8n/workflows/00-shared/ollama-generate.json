@@ -1,0 +1,45 @@
+{
+  "name": "00-shared: Ollama Generate",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trg-ollama",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.OLLAMA_HOST || 'ollama' }}:{{ $env.OLLAMA_PORT || '11434' }}/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $json.model || $env.OLLAMA_MODEL_REASONING || 'llama3.1:8b', prompt: $json.prompt, system: $json.system || '', format: $json.format || undefined, stream: false, options: { temperature: $json.temperature ?? 0.2 } }) }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "http-ollama",
+      "name": "Ollama /api/generate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize Ollama output. If caller asked for json format, parse it.\nconst item = $input.first().json;\nconst raw = item.response ?? '';\nlet parsed = null;\nconst wantsJson = ($('When Executed by Another Workflow').first().json.format === 'json');\nif (wantsJson) {\n  try { parsed = JSON.parse(raw); } catch (e) {\n    // best-effort: pull the first {...} block\n    const m = raw.match(/\\{[\\s\\S]*\\}/);\n    if (m) { try { parsed = JSON.parse(m[0]); } catch (_) {} }\n  }\n}\nreturn [{ json: { response: raw, parsed, model: item.model, done: item.done } }];"
+      },
+      "id": "code-ollama",
+      "name": "Normalize Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 300]
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": { "main": [[{ "node": "Ollama /api/generate", "type": "main", "index": 0 }]] },
+    "Ollama /api/generate": { "main": [[{ "node": "Normalize Response", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

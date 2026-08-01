@@ -1,0 +1,149 @@
+{
+  "name": "02 Dedup: Semantic De-duplication",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trg-manual",
+      "name": "Manual / After Discovery",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.CHROMA_HOST || 'chromadb' }}:{{ $env.CHROMA_PORT || '8000' }}/api/v2/tenants/default_tenant/databases/default_database/collections",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: 'jobs', get_or_create: true, metadata: { 'hnsw:space': 'cosine' } }) }}",
+        "options": {}
+      },
+      "id": "http-coll",
+      "name": "Ensure Jobs Collection",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, title, company_name, coalesce(description,'') AS description FROM app.jobs WHERE status = 'discovered' ORDER BY discovered_at ASC LIMIT 25;",
+        "options": {}
+      },
+      "id": "pg-select",
+      "name": "Get Discovered Jobs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [640, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.OLLAMA_HOST || 'ollama' }}:{{ $env.OLLAMA_PORT || '11434' }}/api/embeddings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL_EMBED || 'nomic-embed-text', prompt: ($json.title + ' at ' + $json.company_name + '. ' + $json.description).slice(0, 4000) }) }}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "http-embed",
+      "name": "Embed Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.CHROMA_HOST || 'chromadb' }}:{{ $env.CHROMA_PORT || '8000' }}/api/v2/tenants/default_tenant/databases/default_database/collections/{{ $('Ensure Jobs Collection').first().json.id }}/query",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query_embeddings: [$json.embedding], n_results: 1 }) }}",
+        "options": {}
+      },
+      "id": "http-query",
+      "name": "Chroma Nearest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decide duplicate vs new using cosine distance from Chroma.\nconst THRESH = 0.10;\nconst job = $('Get Discovered Jobs').item.json;\nconst emb = $('Embed Job').item.json.embedding;\nconst res = $input.item.json;\nconst dist = (res.distances && res.distances[0] && res.distances[0][0] != null) ? res.distances[0][0] : null;\nconst isDup = dist !== null && dist < THRESH;\nreturn [{ json: { job_id: job.id, title: job.title, company: job.company_name, embedding: emb, distance: dist, isDup } }];"
+      },
+      "id": "code-decide",
+      "name": "Duplicate?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict", "version": 2 },
+          "conditions": [{ "leftValue": "={{ $json.isDup }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true", "singleValue": true } }],
+          "combinator": "and"
+        }
+      },
+      "id": "if-dup",
+      "name": "Is Duplicate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1520, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE app.jobs SET status = 'archived' WHERE id = $1;",
+        "options": { "queryReplacement": "={{ $json.job_id }}" }
+      },
+      "id": "pg-archive",
+      "name": "Archive Duplicate",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1760, 200],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.CHROMA_HOST || 'chromadb' }}:{{ $env.CHROMA_PORT || '8000' }}/api/v2/tenants/default_tenant/databases/default_database/collections/{{ $('Ensure Jobs Collection').first().json.id }}/add",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ids: [$json.job_id], embeddings: [$json.embedding], documents: [$json.title + ' @ ' + $json.company], metadatas: [{ company: $json.company }] }) }}",
+        "options": {}
+      },
+      "id": "http-add",
+      "name": "Store Vector",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1760, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE app.jobs SET status = 'deduped', embedding_id = $1 WHERE id = $1;",
+        "options": { "queryReplacement": "={{ $('Duplicate?').item.json.job_id }}" }
+      },
+      "id": "pg-mark",
+      "name": "Mark Deduped",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1980, 400],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    }
+  ],
+  "connections": {
+    "Manual / After Discovery": { "main": [[{ "node": "Ensure Jobs Collection", "type": "main", "index": 0 }]] },
+    "Ensure Jobs Collection": { "main": [[{ "node": "Get Discovered Jobs", "type": "main", "index": 0 }]] },
+    "Get Discovered Jobs": { "main": [[{ "node": "Embed Job", "type": "main", "index": 0 }]] },
+    "Embed Job": { "main": [[{ "node": "Chroma Nearest", "type": "main", "index": 0 }]] },
+    "Chroma Nearest": { "main": [[{ "node": "Duplicate?", "type": "main", "index": 0 }]] },
+    "Duplicate?": { "main": [[{ "node": "Is Duplicate", "type": "main", "index": 0 }]] },
+    "Is Duplicate": { "main": [[{ "node": "Archive Duplicate", "type": "main", "index": 0 }], [{ "node": "Store Vector", "type": "main", "index": 0 }]] },
+    "Store Vector": { "main": [[{ "node": "Mark Deduped", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

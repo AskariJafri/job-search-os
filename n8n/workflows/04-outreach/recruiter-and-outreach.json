@@ -1,0 +1,120 @@
+{
+  "name": "04a Outreach: Discover Contact + Draft Email",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trg-manual",
+      "name": "Manual / After Scoring",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [180, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT a.id AS app_id, a.resume_id, j.id AS job_id, j.title, j.company_name, j.url, coalesce(j.description,'') AS description, left(res.raw_text, 1500) AS resume_snippet FROM app.applications a JOIN app.jobs j ON j.id = a.job_id JOIN app.resumes res ON res.id = a.resume_id WHERE a.status = 'ready' AND NOT EXISTS (SELECT 1 FROM app.outreach o WHERE o.application_id = a.id) ORDER BY a.created_at ASC LIMIT 5;",
+        "options": {}
+      },
+      "id": "pg-ready",
+      "name": "Get Ready Applications",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [380, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.PLAYWRIGHT_HOST || 'playwright-service' }}:{{ $env.PLAYWRIGHT_PORT || '4000' }}/render",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "X-Api-Key", "value": "={{ $env.PLAYWRIGHT_API_KEY }}" }] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ url: $json.url }) }}",
+        "options": { "timeout": 60000, "response": { "response": { "neverError": true } } }
+      },
+      "id": "http-render",
+      "name": "Render Posting Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.OLLAMA_HOST || 'ollama' }}:{{ $env.OLLAMA_PORT || '11434' }}/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL_FAST || 'llama3.2:3b', stream: false, format: 'json', options: { temperature: 0 }, system: 'Extract a publicly listed recruiting/hiring contact email from the page text. Respond ONLY with JSON {\"email\": <string|null>, \"name\": <string|null>, \"title\": <string|null>}. Never guess or fabricate an address; if none is explicitly present, return null.', prompt: (($json.text || '').slice(0, 6000)) }) }}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "http-extract",
+      "name": "Extract Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [820, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.OLLAMA_HOST || 'ollama' }}:{{ $env.OLLAMA_PORT || '11434' }}/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL_REASONING || 'llama3.1:8b', stream: false, format: 'json', options: { temperature: 0.4 }, system: 'Write a short, respectful, personalized outreach email (<160 words) to a recruiter about a specific role. Truthful and specific to the resume highlights. No spammy or exaggerated language. Return ONLY JSON {\"subject\": \"...\", \"body\": \"...\"}.', prompt: 'ROLE: ' + $('Get Ready Applications').item.json.title + ' at ' + $('Get Ready Applications').item.json.company_name + '\\nJOB DESCRIPTION:\\n' + $('Get Ready Applications').item.json.description + '\\n\\nMY RESUME HIGHLIGHTS:\\n' + $('Get Ready Applications').item.json.resume_snippet }) }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "http-outreach",
+      "name": "Generate Outreach",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1040, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build one CTE that creates the recruiter, the pending outreach, and the\n// approval token atomically, returning the token for the notification email.\nfunction q(s){ return String(s==null?'':s).replace(/'/g, \"''\"); }\nconst app = $('Get Ready Applications').item.json;\nlet contact = {}; try { contact = JSON.parse($('Extract Contact').item.json.response || '{}'); } catch(e) {}\nlet mail = {}; const mr = $('Generate Outreach').item.json.response || '';\ntry { mail = JSON.parse(mr); } catch(e) { const m = mr.match(/\\{[\\s\\S]*\\}/); if (m) { try { mail = JSON.parse(m[0]); } catch(_){} } }\nconst email = (contact && contact.email && /.+@.+\\..+/.test(contact.email)) ? contact.email : null;\nconst subject = mail.subject || ('Interest in the ' + app.title + ' role');\nconst body = mail.body || '';\nconst conf = email ? 0.6 : 0.0;\nconst recVals = `(${contact && contact.name ? `'${q(contact.name)}'` : 'NULL'}, ${email ? `'${q(email)}'` : 'NULL'}, '${q(app.company_name)}', ${contact && contact.title ? `'${q(contact.title)}'` : 'NULL'}, 'public-page', ${conf})`;\nconst query = `WITH rec AS (INSERT INTO app.recruiters (full_name,email,company_name,title,source,confidence) VALUES ${recVals} RETURNING id), o AS (INSERT INTO app.outreach (application_id, recruiter_id, subject, body, status) SELECT '${app.app_id}', rec.id, '${q(subject)}', '${q(body)}', 'pending_approval' FROM rec RETURNING id), ap AS (INSERT INTO app.approvals (entity_type, entity_id, action, payload) SELECT 'outreach', o.id, 'send_email', '{}'::jsonb FROM o RETURNING entity_id, token) SELECT ap.token AS token, ap.entity_id AS outreach_id FROM ap;`;\nreturn [{ json: { query, subject, body, recruiter_email: email } }];"
+      },
+      "id": "code-buildsql",
+      "name": "Build Outreach SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1260, 300]
+    },
+    {
+      "parameters": { "operation": "executeQuery", "query": "={{ $json.query }}", "options": {} },
+      "id": "pg-persist",
+      "name": "Persist Outreach",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1480, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.GMAIL_ADDRESS }}",
+        "toEmail": "={{ $env.GMAIL_ADDRESS }}",
+        "subject": "=[Approve?] Outreach: {{ $('Build Outreach SQL').item.json.subject }}",
+        "emailFormat": "text",
+        "text": "=A draft outreach email is waiting for your approval.\n\nTo (recruiter): {{ $('Build Outreach SQL').item.json.recruiter_email || 'NOT FOUND — add address in DB before approving' }}\nSubject: {{ $('Build Outreach SQL').item.json.subject }}\n\n---\n{{ $('Build Outreach SQL').item.json.body }}\n---\n\nAPPROVE: {{ $env.WEBHOOK_URL }}webhook/outreach-decision?token={{ $json.token }}&decision=approved\nREJECT:  {{ $env.WEBHOOK_URL }}webhook/outreach-decision?token={{ $json.token }}&decision=rejected",
+        "options": {}
+      },
+      "id": "smtp-notify",
+      "name": "Email Me For Approval",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1700, 300],
+      "credentials": { "smtp": { "id": "REPLACE_SMTP_CRED", "name": "Gmail SMTP" } }
+    }
+  ],
+  "connections": {
+    "Manual / After Scoring": { "main": [[{ "node": "Get Ready Applications", "type": "main", "index": 0 }]] },
+    "Get Ready Applications": { "main": [[{ "node": "Render Posting Page", "type": "main", "index": 0 }]] },
+    "Render Posting Page": { "main": [[{ "node": "Extract Contact", "type": "main", "index": 0 }]] },
+    "Extract Contact": { "main": [[{ "node": "Generate Outreach", "type": "main", "index": 0 }]] },
+    "Generate Outreach": { "main": [[{ "node": "Build Outreach SQL", "type": "main", "index": 0 }]] },
+    "Build Outreach SQL": { "main": [[{ "node": "Persist Outreach", "type": "main", "index": 0 }]] },
+    "Persist Outreach": { "main": [[{ "node": "Email Me For Approval", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

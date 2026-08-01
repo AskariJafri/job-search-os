@@ -1,0 +1,65 @@
+{
+  "name": "05b Inbox: Follow-up Scheduler",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "hours", "hoursInterval": 6 }] } },
+      "id": "trg-sched",
+      "name": "Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT f.id AS followup_id, f.due_at, f.kind, r.full_name, r.email, r.company_name FROM app.followups f JOIN app.recruiters r ON r.id = f.recruiter_id WHERE f.status = 'scheduled' AND f.due_at <= now() ORDER BY f.due_at ASC LIMIT 20;",
+        "options": {}
+      },
+      "id": "pg-due",
+      "name": "Get Due Follow-ups",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [440, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "calendar": { "__rl": true, "mode": "id", "value": "={{ $env.GOOGLE_CALENDAR_ID || 'primary' }}" },
+        "start": "={{ $now.toISO() }}",
+        "end": "={{ $now.plus({ minutes: 30 }).toISO() }}",
+        "additionalFields": {
+          "summary": "=Follow up with {{ $json.full_name || $json.company_name }} ({{ $json.email }})",
+          "description": "=Follow-up ({{ $json.kind }}) for {{ $json.company_name }}. Created by AI Job Search OS."
+        }
+      },
+      "id": "gcal",
+      "name": "Create Calendar Event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [660, 300],
+      "credentials": { "googleCalendarOAuth2Api": { "id": "REPLACE_GCAL_CRED", "name": "Google Calendar" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE app.followups SET status = 'done', calendar_event_id = $1 WHERE id = $2;",
+        "options": { "queryReplacement": "={{ $json.id }},{{ $('Get Due Follow-ups').item.json.followup_id }}" }
+      },
+      "id": "pg-done",
+      "name": "Mark Follow-up Scheduled",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [880, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    }
+  ],
+  "connections": {
+    "Every 6 Hours": { "main": [[{ "node": "Get Due Follow-ups", "type": "main", "index": 0 }]] },
+    "Get Due Follow-ups": { "main": [[{ "node": "Create Calendar Event", "type": "main", "index": 0 }]] },
+    "Create Calendar Event": { "main": [[{ "node": "Mark Follow-up Scheduled", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

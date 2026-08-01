@@ -1,0 +1,151 @@
+{
+  "name": "06c Knowledge Base: Sync + Search",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "hours", "hoursInterval": 12 }] } },
+      "id": "trg-sync",
+      "name": "Every 12 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 220]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.CHROMA_HOST || 'chromadb' }}:{{ $env.CHROMA_PORT || '8000' }}/api/v2/tenants/default_tenant/databases/default_database/collections",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: 'knowledge_base', get_or_create: true, metadata: { 'hnsw:space': 'cosine' } }) }}",
+        "options": {}
+      },
+      "id": "http-coll-sync",
+      "name": "Ensure KB Collection",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 220]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT 'application:' || a.id AS ext_id, ('Application to ' || j.title || ' at ' || j.company_name || '. Status ' || a.status) AS doc FROM app.applications a JOIN app.jobs j ON j.id = a.job_id WHERE a.updated_at > now() - interval '12 hours' UNION ALL SELECT 'interaction:' || i.id, ('[' || i.direction || '/' || coalesce(i.classification,'') || '] ' || coalesce(i.subject,'') || ' :: ' || coalesce(i.summary, left(coalesce(i.body,''), 500))) FROM app.interactions i WHERE i.occurred_at > now() - interval '12 hours' LIMIT 200;",
+        "options": {}
+      },
+      "id": "pg-recent",
+      "name": "Get Recent Items",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [640, 220],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.OLLAMA_HOST || 'ollama' }}:{{ $env.OLLAMA_PORT || '11434' }}/api/embeddings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL_EMBED || 'nomic-embed-text', prompt: $json.doc }) }}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "http-embed-sync",
+      "name": "Embed Doc",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 220]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.CHROMA_HOST || 'chromadb' }}:{{ $env.CHROMA_PORT || '8000' }}/api/v2/tenants/default_tenant/databases/default_database/collections/{{ $('Ensure KB Collection').first().json.id }}/upsert",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ids: [$('Get Recent Items').item.json.ext_id], embeddings: [$json.embedding], documents: [$('Get Recent Items').item.json.doc] }) }}",
+        "options": {}
+      },
+      "id": "http-upsert",
+      "name": "Upsert To KB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1080, 220]
+    },
+
+    {
+      "parameters": { "httpMethod": "GET", "path": "kb-search", "responseMode": "responseNode", "options": {} },
+      "id": "wh-search",
+      "webhookId": "122f79bd-6fa4-42d8-94f1-f38674273a75",
+      "name": "KB Search Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 480]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.CHROMA_HOST || 'chromadb' }}:{{ $env.CHROMA_PORT || '8000' }}/api/v2/tenants/default_tenant/databases/default_database/collections",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: 'knowledge_base', get_or_create: true, metadata: { 'hnsw:space': 'cosine' } }) }}",
+        "options": {}
+      },
+      "id": "http-coll-search",
+      "name": "Ensure KB (search)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 480]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.OLLAMA_HOST || 'ollama' }}:{{ $env.OLLAMA_PORT || '11434' }}/api/embeddings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL_EMBED || 'nomic-embed-text', prompt: ($('KB Search Webhook').first().json.query.q || '') }) }}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "http-embed-q",
+      "name": "Embed Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [640, 480]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.CHROMA_HOST || 'chromadb' }}:{{ $env.CHROMA_PORT || '8000' }}/api/v2/tenants/default_tenant/databases/default_database/collections/{{ $('Ensure KB (search)').first().json.id }}/query",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query_embeddings: [$json.embedding], n_results: 5 }) }}",
+        "options": {}
+      },
+      "id": "http-query-kb",
+      "name": "Search KB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 480]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ query: $('KB Search Webhook').first().json.query.q, results: ($json.documents && $json.documents[0]) || [], distances: ($json.distances && $json.distances[0]) || [] }) }}",
+        "options": {}
+      },
+      "id": "resp-search",
+      "name": "Return Results",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1080, 480]
+    }
+  ],
+  "connections": {
+    "Every 12 Hours": { "main": [[{ "node": "Ensure KB Collection", "type": "main", "index": 0 }]] },
+    "Ensure KB Collection": { "main": [[{ "node": "Get Recent Items", "type": "main", "index": 0 }]] },
+    "Get Recent Items": { "main": [[{ "node": "Embed Doc", "type": "main", "index": 0 }]] },
+    "Embed Doc": { "main": [[{ "node": "Upsert To KB", "type": "main", "index": 0 }]] },
+    "KB Search Webhook": { "main": [[{ "node": "Ensure KB (search)", "type": "main", "index": 0 }]] },
+    "Ensure KB (search)": { "main": [[{ "node": "Embed Query", "type": "main", "index": 0 }]] },
+    "Embed Query": { "main": [[{ "node": "Search KB", "type": "main", "index": 0 }]] },
+    "Search KB": { "main": [[{ "node": "Return Results", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

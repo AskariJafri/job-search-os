@@ -1,0 +1,57 @@
+# ---- Secrets (NEVER commit) ----
+.env
+.env.*
+!.env.example
+*_key.txt
+*_token.txt
+claude_key.txt
+context_7_key.txt
+huggingface_token.txt
+secrets/
+*.pem
+
+# ---- Runtime data / volumes ----
+data/
+volumes/
+postgres-data/
+ollama-data/
+chroma-data/
+n8n-data/
+storage/
+*.sqlite
+
+# ---- Generated artifacts ----
+output/
+artifacts/
+tailored-resumes/
+cover-letters/
+reports/out/
+*.log
+
+# ---- Node ----
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+dist/
+build/
+playwright-report/
+.cache/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# ---- Legacy loose exports (kept locally for reference, not versioned) ----
+/.json
+/JobScraper.json
+/JobScraper.json.txt
+/dropshipping.json
+/testJob.josn
+/New Text Document.txt
+
+# ---- Machine-local agent/editor settings ----
+.claude/settings.local.json
+

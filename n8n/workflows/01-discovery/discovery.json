@@ -1,0 +1,83 @@
+{
+  "name": "01 Discovery: Find Jobs",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "hours", "hoursInterval": 2 }] }
+      },
+      "id": "trg-sched",
+      "name": "Every 2 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {},
+      "id": "trg-manual",
+      "name": "Manual Run",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [220, 460]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Source list. Edit here or load from config/sources.yml (mounted).\n// Each item becomes one call to the playwright-service /scrape endpoint.\nconst sources = [\n  { type: 'greenhouse', board: 'gitlab' },\n  { type: 'greenhouse', board: 'stripe' },\n  { type: 'lever', company: 'netflix' }\n  // { type: 'genericCareers', url: 'https://example.com/careers', company_name: 'Example' }\n];\nreturn sources.map((s) => ({ json: s }));"
+      },
+      "id": "code-sources",
+      "name": "Load Sources",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 380]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.PLAYWRIGHT_HOST || 'playwright-service' }}:{{ $env.PLAYWRIGHT_PORT || '4000' }}/scrape",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "X-Api-Key", "value": "={{ $env.PLAYWRIGHT_API_KEY }}" }] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": { "timeout": 120000, "response": { "response": { "neverError": true } } }
+      },
+      "id": "http-scrape",
+      "name": "Scrape Source",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [700, 380]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Flatten jobs from all sources into one parameterized INSERT each.\n// content_hash is computed in SQL (md5) for exact-duplicate suppression.\nfunction esc(v){ if(v===null||v===undefined) return 'NULL'; return `'${String(v).replace(/'/g,\"''\")}'`; }\nfunction boolSql(v){ return (v===null||v===undefined) ? 'NULL' : (v ? 'true':'false'); }\nconst out=[];\nfor (const it of $input.all()) {\n  const jobs = it.json.jobs || [];\n  for (const j of jobs) {\n    const raw = JSON.stringify(j).replace(/'/g, \"''\");\n    const hashExpr = `md5(lower(coalesce(${esc(j.title)},''))||'|'||lower(coalesce(${esc(j.company_name)},''))||'|'||left(lower(coalesce(${esc(j.description)},'')),500))`;\n    const query = `INSERT INTO app.jobs (source, source_job_id, title, company_name, location, remote, url, description, raw, content_hash, status)\\nVALUES (${esc(j.source)}, ${esc(j.source_job_id)}, ${esc(j.title)}, ${esc(j.company_name)}, ${esc(j.location)}, ${boolSql(j.remote)}, ${esc(j.url)}, ${esc(j.description)}, '${raw}'::jsonb, ${hashExpr}, 'discovered')\\nON CONFLICT (content_hash) DO NOTHING;`;\n    out.push({ json: { query, title: j.title, company: j.company_name } });\n  }\n}\nreturn out.length ? out : [{ json: { query: 'SELECT 1;', title: null, company: null } }];"
+      },
+      "id": "code-buildsql",
+      "name": "Build Upsert SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [940, 380]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.query }}",
+        "options": {}
+      },
+      "id": "pg-upsert",
+      "name": "Upsert Jobs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1180, 380],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    }
+  ],
+  "connections": {
+    "Every 2 Hours": { "main": [[{ "node": "Load Sources", "type": "main", "index": 0 }]] },
+    "Manual Run": { "main": [[{ "node": "Load Sources", "type": "main", "index": 0 }]] },
+    "Load Sources": { "main": [[{ "node": "Scrape Source", "type": "main", "index": 0 }]] },
+    "Scrape Source": { "main": [[{ "node": "Build Upsert SQL", "type": "main", "index": 0 }]] },
+    "Build Upsert SQL": { "main": [[{ "node": "Upsert Jobs", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

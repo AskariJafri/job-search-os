@@ -1,0 +1,86 @@
+{
+  "name": "06b Interview Prep Packages",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trg-manual",
+      "name": "Manual / On Interview Request",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT a.id AS app_id, j.title, j.company_name, coalesce(j.description,'') AS description, left(res.raw_text, 1500) AS resume_snippet FROM app.interactions i JOIN app.recruiters r ON r.id = i.recruiter_id JOIN app.outreach o ON o.recruiter_id = r.id JOIN app.applications a ON a.id = o.application_id JOIN app.jobs j ON j.id = a.job_id JOIN app.resumes res ON res.id = a.resume_id WHERE i.classification = 'interview_request' AND NOT EXISTS (SELECT 1 FROM app.interview_prep p WHERE p.application_id = a.id) LIMIT 5;",
+        "options": {}
+      },
+      "id": "pg-need",
+      "name": "Applications Needing Prep",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [420, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.OLLAMA_HOST || 'ollama' }}:{{ $env.OLLAMA_PORT || '11434' }}/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL_REASONING || 'llama3.1:8b', stream: false, format: 'json', options: { temperature: 0.5 }, system: 'Create an interview prep package. Return ONLY JSON {\"company_research\": \"...\", \"likely_questions\": [\"...\"], \"talking_points\": [\"...\"], \"questions_to_ask\": [\"...\"]}. Base talking points only on facts in the resume.', prompt: 'ROLE: ' + $json.title + ' at ' + $json.company_name + '\\nJOB:\\n' + $json.description + '\\n\\nMY RESUME:\\n' + $json.resume_snippet }) }}",
+        "options": { "timeout": 180000 }
+      },
+      "id": "http-prep",
+      "name": "Generate Prep",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "function q(s){ return String(s==null?'':s).replace(/'/g, \"''\"); }\nconst app = $('Applications Needing Prep').item.json;\nlet pkg = {}; const r = $json.response || '';\ntry { pkg = JSON.parse(r); } catch(e) { const m = r.match(/\\{[\\s\\S]*\\}/); if (m) { try { pkg = JSON.parse(m[0]); } catch(_){} } }\nconst payload = q(JSON.stringify(pkg));\nconst query = `INSERT INTO app.interview_prep (application_id, package) VALUES ('${app.app_id}', '${payload}'::jsonb);`;\nconst text = `Interview prep — ${app.title} @ ${app.company_name}\\n\\nCompany: ${pkg.company_research || ''}\\n\\nLikely questions:\\n- ${(pkg.likely_questions||[]).join('\\n- ')}\\n\\nTalking points:\\n- ${(pkg.talking_points||[]).join('\\n- ')}\\n\\nAsk them:\\n- ${(pkg.questions_to_ask||[]).join('\\n- ')}`;\nreturn [{ json: { query, text, title: app.title, company: app.company_name } }];"
+      },
+      "id": "code-prep",
+      "name": "Build Prep SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 300]
+    },
+    {
+      "parameters": { "operation": "executeQuery", "query": "={{ $json.query }}", "options": {} },
+      "id": "pg-save",
+      "name": "Save Prep",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1080, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.GMAIL_ADDRESS }}",
+        "toEmail": "={{ $env.GMAIL_ADDRESS }}",
+        "subject": "=Interview prep: {{ $('Build Prep SQL').item.json.title }} @ {{ $('Build Prep SQL').item.json.company }}",
+        "emailFormat": "text",
+        "text": "={{ $('Build Prep SQL').item.json.text }}",
+        "options": {}
+      },
+      "id": "smtp-prep",
+      "name": "Email Prep",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1300, 300],
+      "credentials": { "smtp": { "id": "REPLACE_SMTP_CRED", "name": "Gmail SMTP" } }
+    }
+  ],
+  "connections": {
+    "Manual / On Interview Request": { "main": [[{ "node": "Applications Needing Prep", "type": "main", "index": 0 }]] },
+    "Applications Needing Prep": { "main": [[{ "node": "Generate Prep", "type": "main", "index": 0 }]] },
+    "Generate Prep": { "main": [[{ "node": "Build Prep SQL", "type": "main", "index": 0 }]] },
+    "Build Prep SQL": { "main": [[{ "node": "Save Prep", "type": "main", "index": 0 }]] },
+    "Save Prep": { "main": [[{ "node": "Email Prep", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

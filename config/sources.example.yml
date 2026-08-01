@@ -1,0 +1,22 @@
+# Job sources to discover from. Copy to config/sources.yml and edit.
+# Greenhouse/Lever use free public ATS APIs (no browser, ToS-friendly).
+# `careers` entries are rendered with Playwright and parsed downstream.
+
+greenhouse:
+  # board token = the slug in boards.greenhouse.io/<token>
+  - stripe
+  - figma
+
+lever:
+  # company token = the slug in jobs.lever.co/<token>
+  - netflix
+
+careers:
+  - company_name: "Example Co"
+    url: "https://example.com/careers"
+    link_selector: "a.job-link"     # CSS selector for job posting links
+
+# Free-text keywords used downstream to filter/boost relevance.
+keywords:
+  include: ["backend", "python", "platform", "n8n", "automation"]
+  exclude: ["unpaid", "internship"]

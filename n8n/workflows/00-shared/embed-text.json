@@ -1,0 +1,45 @@
+{
+  "name": "00-shared: Embed Text",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trg-embed",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.OLLAMA_HOST || 'ollama' }}:{{ $env.OLLAMA_PORT || '11434' }}/api/embeddings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL_EMBED || 'nomic-embed-text', prompt: $json.text }) }}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "http-embed",
+      "name": "Ollama /api/embeddings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pass through the embedding vector plus any id the caller supplied.\nconst emb = $input.first().json.embedding;\nconst src = $('When Executed by Another Workflow').first().json;\nreturn [{ json: { id: src.id || null, text: src.text, embedding: emb, dims: Array.isArray(emb) ? emb.length : 0 } }];"
+      },
+      "id": "code-embed",
+      "name": "Shape Embedding",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 300]
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": { "main": [[{ "node": "Ollama /api/embeddings", "type": "main", "index": 0 }]] },
+    "Ollama /api/embeddings": { "main": [[{ "node": "Shape Embedding", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

@@ -1,0 +1,116 @@
+{
+  "name": "06a Reports: Daily & Weekly",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "days", "triggerAtHour": 8 }] } },
+      "id": "trg-daily",
+      "name": "Daily 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 220]
+    },
+    {
+      "parameters": { "rule": { "interval": [{ "field": "weeks", "triggerAtDay": [1], "triggerAtHour": 8 }] } },
+      "id": "trg-weekly",
+      "name": "Weekly Mon 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 400]
+    },
+    {
+      "parameters": {
+        "assignments": { "assignments": [
+          { "id": "a1", "name": "period", "value": "daily", "type": "string" },
+          { "id": "a2", "name": "days", "value": 1, "type": "number" }
+        ] },
+        "options": {}
+      },
+      "id": "set-daily",
+      "name": "Set Daily",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [420, 220]
+    },
+    {
+      "parameters": {
+        "assignments": { "assignments": [
+          { "id": "b1", "name": "period", "value": "weekly", "type": "string" },
+          { "id": "b2", "name": "days", "value": 7, "type": "number" }
+        ] },
+        "options": {}
+      },
+      "id": "set-weekly",
+      "name": "Set Weekly",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [420, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const days = Number($json.days || 1);\nconst period = $json.period || 'daily';\nconst query = `SELECT '${period}' AS period, (SELECT count(*) FROM app.jobs WHERE discovered_at > now()-interval '${days} days') AS jobs_discovered, (SELECT count(*) FROM app.job_scores WHERE created_at > now()-interval '${days} days') AS jobs_scored, (SELECT count(*) FROM app.applications WHERE created_at > now()-interval '${days} days') AS applications, (SELECT count(*) FROM app.outreach WHERE sent_at > now()-interval '${days} days') AS outreach_sent, (SELECT count(*) FROM app.interactions WHERE direction='inbound' AND occurred_at > now()-interval '${days} days') AS replies, (SELECT count(*) FROM app.interactions WHERE classification='interview_request' AND occurred_at > now()-interval '${days} days') AS interview_requests;`;\nreturn [{ json: { query, period } }];"
+      },
+      "id": "code-metricsql",
+      "name": "Build Metrics Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": { "operation": "executeQuery", "query": "={{ $json.query }}", "options": {} },
+      "id": "pg-metrics",
+      "name": "Gather Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [860, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const m = $json;\nconst period = $('Build Metrics Query').item.json.period;\nconst payload = JSON.stringify(m).replace(/'/g, \"''\");\nconst text = `Job Search ${period} report\\n\\nDiscovered: ${m.jobs_discovered}\\nScored: ${m.jobs_scored}\\nApplications: ${m.applications}\\nOutreach sent: ${m.outreach_sent}\\nReplies: ${m.replies}\\nInterview requests: ${m.interview_requests}`;\nconst query = `INSERT INTO app.reports (period, payload) VALUES ('${period}', '${payload}'::jsonb);`;\nreturn [{ json: { query, text, period } }];"
+      },
+      "id": "code-report",
+      "name": "Build Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": { "operation": "executeQuery", "query": "={{ $json.query }}", "options": {} },
+      "id": "pg-save",
+      "name": "Save Report",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1300, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.GMAIL_ADDRESS }}",
+        "toEmail": "={{ $env.GMAIL_ADDRESS }}",
+        "subject": "=Job Search {{ $('Build Report').item.json.period }} report",
+        "emailFormat": "text",
+        "text": "={{ $('Build Report').item.json.text }}",
+        "options": {}
+      },
+      "id": "smtp-report",
+      "name": "Email Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1520, 300],
+      "credentials": { "smtp": { "id": "REPLACE_SMTP_CRED", "name": "Gmail SMTP" } }
+    }
+  ],
+  "connections": {
+    "Daily 08:00": { "main": [[{ "node": "Set Daily", "type": "main", "index": 0 }]] },
+    "Weekly Mon 08:00": { "main": [[{ "node": "Set Weekly", "type": "main", "index": 0 }]] },
+    "Set Daily": { "main": [[{ "node": "Build Metrics Query", "type": "main", "index": 0 }]] },
+    "Set Weekly": { "main": [[{ "node": "Build Metrics Query", "type": "main", "index": 0 }]] },
+    "Build Metrics Query": { "main": [[{ "node": "Gather Metrics", "type": "main", "index": 0 }]] },
+    "Gather Metrics": { "main": [[{ "node": "Build Report", "type": "main", "index": 0 }]] },
+    "Build Report": { "main": [[{ "node": "Save Report", "type": "main", "index": 0 }]] },
+    "Save Report": { "main": [[{ "node": "Email Report", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

@@ -1,0 +1,167 @@
+{
+  "name": "03 Scoring: Score, Tailor, Cover Letter",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trg-manual",
+      "name": "Manual / After Dedup",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [180, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, raw_text FROM app.resumes WHERE is_default = true ORDER BY created_at DESC LIMIT 1;",
+        "options": {}
+      },
+      "id": "pg-resume",
+      "name": "Get Default Resume",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [380, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, title, company_name, coalesce(description,'') AS description FROM app.jobs WHERE status = 'deduped' ORDER BY discovered_at ASC LIMIT 10;",
+        "options": {}
+      },
+      "id": "pg-jobs",
+      "name": "Get Jobs to Score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [600, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.OLLAMA_HOST || 'ollama' }}:{{ $env.OLLAMA_PORT || '11434' }}/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL_REASONING || 'llama3.1:8b', stream: false, format: 'json', options: { temperature: 0.1, num_ctx: 8192 }, system: 'You are a strict technical recruiter. Score how well the candidate matches the job. Respond ONLY with JSON: {\"score\": <integer 0-100>, \"skills_match\": <0-100>, \"experience_match\": <0-100>, \"reasoning\": \"<two sentences>\"}.', prompt: 'MASTER RESUME:\\n' + $('Get Default Resume').first().json.raw_text + '\\n\\nJOB: ' + $json.title + ' at ' + $json.company_name + '\\n' + ($json.description || '').slice(0, 3000) }) }}",
+        "options": { "timeout": 300000 }
+      },
+      "id": "http-score",
+      "name": "Score Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [820, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Parse the score JSON, build the persist SQL, and decide apply/park.\nfunction q(s){ return String(s==null?'':s).replace(/'/g, \"''\"); }\nconst raw = $json.response || '';\nlet p; try { p = JSON.parse(raw); } catch(e){ const m = raw.match(/\\{[\\s\\S]*\\}/); p = m ? JSON.parse(m[0]) : { score: 0 }; }\nconst job = $('Get Jobs to Score').item.json;\nconst resume = $('Get Default Resume').first().json;\nconst score = Math.max(0, Math.min(100, Number(p.score) || 0));\nconst minApply = Number($env.SCORE_MIN_TO_APPLY || 70);\nconst apply = score >= minApply;\nconst breakdown = q(JSON.stringify({ skills_match: p.skills_match ?? null, experience_match: p.experience_match ?? null }));\nconst model = $env.OLLAMA_MODEL_REASONING || 'llama3.1:8b';\nconst query = `INSERT INTO app.job_scores (job_id, resume_id, score, breakdown, reasoning, model) VALUES ('${job.id}','${resume.id}',${score},'${breakdown}'::jsonb,'${q(p.reasoning)}','${q(model)}') ON CONFLICT (job_id, resume_id) DO UPDATE SET score = EXCLUDED.score, breakdown = EXCLUDED.breakdown, reasoning = EXCLUDED.reasoning; UPDATE app.jobs SET status = '${apply ? 'scored' : 'parked'}' WHERE id = '${job.id}';`;\nreturn { json: { job_id: job.id, resume_id: resume.id, title: job.title, company: job.company_name, description: job.description, resume_text: resume.raw_text, score, apply, query } };"
+      },
+      "id": "code-parse",
+      "name": "Parse Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1040, 300]
+    },
+    {
+      "parameters": { "operation": "executeQuery", "query": "={{ $json.query }}", "options": {} },
+      "id": "pg-savescore",
+      "name": "Save Score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1260, 300],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict", "version": 2 },
+          "conditions": [{ "leftValue": "={{ $('Parse Score').item.json.apply }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true", "singleValue": true } }],
+          "combinator": "and"
+        }
+      },
+      "id": "if-apply",
+      "name": "Apply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1480, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.OLLAMA_HOST || 'ollama' }}:{{ $env.OLLAMA_PORT || '11434' }}/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL_REASONING || 'llama3.1:8b', stream: false, options: { temperature: 0.3, num_ctx: 8192 }, system: 'You are an expert resume editor. Rewrite and reorder the resume to target the job. CRITICAL RULE: use ONLY facts present in the master resume. Never invent employers, titles, dates, skills, metrics, or achievements. If a required skill is absent, do not claim it. Output clean markdown.', prompt: 'MASTER RESUME:\\n' + $('Parse Score').item.json.resume_text + '\\n\\nTARGET JOB: ' + $('Parse Score').item.json.title + ' at ' + $('Parse Score').item.json.company + '\\n' + ($('Parse Score').item.json.description || '').slice(0, 3000) }) }}",
+        "options": { "timeout": 300000 }
+      },
+      "id": "http-tailor",
+      "name": "Tailor Resume",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1700, 220]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://{{ $env.OLLAMA_HOST || 'ollama' }}:{{ $env.OLLAMA_PORT || '11434' }}/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL_REASONING || 'llama3.1:8b', stream: false, options: { temperature: 0.4, num_ctx: 8192 }, system: 'Write a concise, specific, truthful cover letter (max 250 words). Use ONLY facts from the resume. No invented achievements. Professional, warm, not sycophantic.', prompt: 'RESUME:\\n' + $('Parse Score').item.json.resume_text + '\\n\\nJOB: ' + $('Parse Score').item.json.title + ' at ' + $('Parse Score').item.json.company + '\\n' + ($('Parse Score').item.json.description || '').slice(0, 3000) }) }}",
+        "options": { "timeout": 300000 }
+      },
+      "id": "http-cover",
+      "name": "Cover Letter",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1920, 220]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Assemble the application package file + persist SQL.\nconst ps = $('Parse Score').item.json;\nconst tailored = $('Tailor Resume').item.json.response || '';\nconst cover = $('Cover Letter').item.json.response || '';\nconst md = `# Tailored Resume \\u2014 ${ps.title} @ ${ps.company}\\n\\n${tailored}\\n\\n---\\n\\n# Cover Letter\\n\\n${cover}\\n`;\nconst path = `/data/storage/applications/${ps.job_id}.md`;\nconst query = `INSERT INTO app.applications (job_id, resume_id, tailored_resume_path, cover_letter_path, status) VALUES ('${ps.job_id}','${ps.resume_id}','${path}','${path}','ready') ON CONFLICT (job_id, resume_id) DO UPDATE SET tailored_resume_path = EXCLUDED.tailored_resume_path, cover_letter_path = EXCLUDED.cover_letter_path, status = 'ready'; UPDATE app.jobs SET status = 'ready' WHERE id = '${ps.job_id}';`;\nreturn { json: { job_id: ps.job_id, path, query }, binary: { data: { data: Buffer.from(md).toString('base64'), fileName: `${ps.job_id}.md`, mimeType: 'text/markdown' } } };"
+      },
+      "id": "code-assemble",
+      "name": "Assemble Package",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2140, 220]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $json.path }}",
+        "dataPropertyName": "data",
+        "options": {}
+      },
+      "id": "fs-write",
+      "name": "Write Package File",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [2360, 220]
+    },
+    {
+      "parameters": { "operation": "executeQuery", "query": "={{ $('Assemble Package').item.json.query }}", "options": {} },
+      "id": "pg-app",
+      "name": "Create Application",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2580, 220],
+      "credentials": { "postgres": { "id": "REPLACE_PG_CRED", "name": "Postgres (jobsearch)" } }
+    }
+  ],
+  "connections": {
+    "Manual / After Dedup": { "main": [[{ "node": "Get Default Resume", "type": "main", "index": 0 }]] },
+    "Get Default Resume": { "main": [[{ "node": "Get Jobs to Score", "type": "main", "index": 0 }]] },
+    "Get Jobs to Score": { "main": [[{ "node": "Score Job", "type": "main", "index": 0 }]] },
+    "Score Job": { "main": [[{ "node": "Parse Score", "type": "main", "index": 0 }]] },
+    "Parse Score": { "main": [[{ "node": "Save Score", "type": "main", "index": 0 }, { "node": "Apply?", "type": "main", "index": 0 }]] },
+    "Save Score": { "main": [[]] },
+    "Apply?": { "main": [[{ "node": "Tailor Resume", "type": "main", "index": 0 }], []] },
+    "Tailor Resume": { "main": [[{ "node": "Cover Letter", "type": "main", "index": 0 }]] },
+    "Cover Letter": { "main": [[{ "node": "Assemble Package", "type": "main", "index": 0 }]] },
+    "Assemble Package": { "main": [[{ "node": "Write Package File", "type": "main", "index": 0 }]] },
+    "Write Package File": { "main": [[{ "node": "Create Application", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}
